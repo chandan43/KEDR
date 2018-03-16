@@ -1,0 +1,164 @@
+KEDR framework for kernel memory leaks
+
+What is KEDR:
+============
+
+KEDR is a framework for analyzing Linux kernel modules at runtime, including device drivers, file system
+modules, etc. The function calls made by the module can be intercepted, which further helps in detecting
+memory leaks at kernel space. This save the information(trace) of the functions which were called which
+can be further analyzed.
+For the present, KEDR is provided for 32- and 64-bit x86 systems.
+For more info: 
+http://code.google.com/p/kedr/
+
+Installation:
+============
+Latest released package can be downloaded from the link mentioned above.
+Used package: kedr-0.5.tar.bz2
+To be able to build KEDR, you need the following:
+i.   Your Linux system should have kernel version 2.6.32 or newer.
+ii.  Make build system (http://cmake.org/) version 2.6 or newer (version 2.8 or newer is preferable)
+iii. GNU C and C++ compilers version 4.0 or newer 
+iV.  GNU Make
+V.   Other tools and packages necessary to build kernel modules are needed.
+
+Since it requires cmake, so it need to be installed
+# yum install cmake
+Now, untar the package under home directory.
+# tar -xvf kedr-0.5.tar.bz2 -C /home
+# mkdir /home/kedr-build
+# cd /home/kedr-build
+# cmake /home/kedr-0.5
+# make; make install
+
+This will export kedr binary which will be under /usr/local/bin/
+
+Analyzing sample module:
+=======================
+
+Debugfs is assumed to be mounted to /sys/kernel/debug. If it is not the case for your system, you can
+mount it manually by executing the following..
+# mount debugfs -t debugfs /sys/kernel/debug
+
+elow is the sample module..
+Copy the below content into file hello.c :
+#include <linux/init.h>
+#include <linux/module.h>
+#include <linux/kernel.h>
+#include <linux/vmalloc.h>
+void myfunc1(void)
+{
+        char *ptr;
+        printk(">>>> IN FUNCTION1 <<<<\n");
+        ptr = vmalloc(10);
+}
+void myfunc2(void)
+{
+        char *ptr1, *ptr2;
+        printk(">>>> IN FUNCTION2 <<<<\n");
+        ptr1 = vmalloc(20);
+        ptr2 = vmalloc(30);
+}
+void myfunc3(void)
+{
+        char *ptr;
+        printk(">>>> IN FUNCTION3 <<<<\n");
+        ptr = vmalloc(40);
+        vfree(ptr);
+}   
+void myfunc4(void)
+{
+        char *ptr1, *ptr2;
+        printk(">>>> IN FUNCTION4 <<<<\n");
+        ptr1 = vmalloc(50);
+        ptr2 = vmalloc(60);
+        vfree(ptr2);
+}
+int hello_init(void)
+{
+        printk(KERN_ALERT "Hello World\n");
+        myfunc1();
+        myfunc2();
+        myfunc3();
+        myfunc4();
+        return 0;
+}
+static void hello_exit(void)
+{
+        printk(KERN_ALERT "Goodbye World\n");
+}
+module_init(hello_init);
+module_exit(hello_exit);
+MODULE_LICENSE("GPL v2");
+MODULE_AUTHOR("Your Name");
+
+KEDR framework
+Create one Makefile and copy the below content into it:
+EXTRA_CFLAGS=-g
+obj-m := hello-kernel.o
+hello-kernel-objs := hello.o
+all:
+        make -C /lib/modules/$(shell uname -r)/build M=$(PWD) modules
+clean:
+        make -C /lib/modules/$(shell uname -r)/build M=$(PWD) clean
+
+Now compile the module..
+# make
+This will compile the code giving hello-kernel.ko as kernel module.
+Before inserting the module kedr need to be started so that it can be analyzed. How to do it is mentioned
+below..
+# kedr start hello-kernel.ko
+or 
+# /usr/local/bin/kedr start hello-kernel.ko
+
+Following message will appear assuring that KEDR has started.
+Starting KEDR...
+insmod /usr/local/lib/modules/3.10.33/misc/kedr.ko target_name=hello-kernel
+insmod /usr/local/lib/modules/3.10.33/misc/kedr_leak_check.ko
+insmod /usr/local/lib/modules/3.10.33/misc/kedr_lc_common_mm.ko
+
+KEDR started.
+
+Clear all the dmesg logs by dmesg -c
+
+Insert and the remove the kernel module.
+# dmesg -c
+# insmod hello-kernel.ko
+# rmmod hello-kernel.ko
+
+All the information related to memory leaks for this module will be dumped under the following path.
+
+# cat /sys/kernel/debug/kedr_leak_check/hello_kernel/info
+Target module: "hello_kernel", init area at fe01f000, core area at fe01d000
+Allocations: 6
+Possible leaks: 4
+Unallocated frees: 0
+
+From the above information it is understood that total allocations were at 6 places out of which 4 are not
+freed leading to memory leaks.
+
+
+The concerned memory leak info further can be observed at the following location.
+
+# cat /sys/kernel/debug/kedr_leak_check/hello_kernel/possible_leaks
+
+Process: insmod (PID: 29082)
+Address: 0xfe027000, size: 10; stack trace of the allocation:
+[<fe01d0c5>] myfunc1 +0x35/0x50 [hello_kernel]
+----------------------------------------
+Process: insmod (PID: 29082)
+Address: 0xfe02f000, size: 50; stack trace of the allocation:
+[<fe01d115>] myfunc4 +0x35/0x80 [hello_kernel]
+----------------------------------------
+Process: insmod (PID: 29082)
+Address: 0xfe02b000, size: 30; stack trace of the allocation:
+[<fe01d07d>] myfunc2+0x4d/0x60 [hello_kernel]
+----------------------------------------
+Process: insmod (PID: 29082)
+Address: 0xfe029000, size: 20; stack trace of the allocation:
+[<fe01d065>] myfunc2+0x35/0x60 [hello_kernel]
+----------------------------------------
+
+Highlighted are the functions in which memory is allocated but is not unallocated.
+Further it can be analyzed by using objdump, by which we can disassembled the code and locate the
+precise location of the leak with the help of offsets shown above in the dump.
